@@ -60,16 +60,31 @@ func (s *Server) completion(ctx context.Context, params *protocol.CompletionPara
 	}, nil
 }
 
+const maxDeepCompletions = 3
+
 func toProtocolCompletionItems(candidates []source.CompletionItem, prefix string, rng protocol.Range, insertTextFormat protocol.InsertTextFormat, usePlaceholders bool) []protocol.CompletionItem {
 	sort.SliceStable(candidates, func(i, j int) bool {
 		return candidates[i].Score > candidates[j].Score
 	})
-	items := make([]protocol.CompletionItem, 0, len(candidates))
+	var (
+		items    = make([]protocol.CompletionItem, 0, len(candidates))
+		seenDeep int
+	)
 	for i, candidate := range candidates {
 		// Match against the label.
 		if !strings.HasPrefix(candidate.Label, prefix) {
 			continue
 		}
+
+		// Limit the number of deep completions to not overwhelm the user in cases
+		// with dozens of deep completion matches.
+		if candidate.Depth > 0 {
+			if seenDeep >= maxDeepCompletions {
+				continue
+			}
+			seenDeep++
+		}
+
 		insertText := candidate.InsertText
 		if insertTextFormat == protocol.SnippetTextFormat {
 			insertText = candidate.Snippet(usePlaceholders)
