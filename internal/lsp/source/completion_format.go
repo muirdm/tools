@@ -24,7 +24,7 @@ func (c *completer) item(obj types.Object, score float64) CompletionItem {
 	}
 
 	var (
-		label              = obj.Name()
+		label              = c.deepChainString(obj.Name())
 		detail             = types.TypeString(obj.Type(), c.qf)
 		insert             = label
 		kind               CompletionItemKind
@@ -55,16 +55,20 @@ func (c *completer) item(obj types.Object, score float64) CompletionItem {
 			break
 		}
 		params := formatParams(sig.Params(), sig.Variadic(), c.qf)
+
+		plainSnippet, placeholderSnippet = c.functionCallSnippets(label, params)
+
 		results, writeParens := formatResults(sig.Results(), c.qf)
 		label, detail = formatFunction(obj.Name(), params, results, writeParens)
-		plainSnippet, placeholderSnippet = c.functionCallSnippets(obj.Name(), params)
+		// Add back the deep completion.
+		label = c.deepChainString(label)
 		kind = FunctionCompletionItem
 		if sig.Recv() != nil {
 			kind = MethodCompletionItem
 		}
 	case *types.PkgName:
 		kind = PackageCompletionItem
-		detail = fmt.Sprintf("\"%s\"", obj.Imported().Path())
+		detail = fmt.Sprintf("%q", obj.Imported().Path())
 	}
 	detail = strings.TrimPrefix(detail, "untyped ")
 
@@ -73,10 +77,19 @@ func (c *completer) item(obj types.Object, score float64) CompletionItem {
 		InsertText:         insert,
 		Detail:             detail,
 		Kind:               kind,
+		Depth:              len(c.deepChain),
 		Score:              score,
 		plainSnippet:       plainSnippet,
 		placeholderSnippet: placeholderSnippet,
 	}
+}
+
+// deepChainString joins the chain of objects' names together on ".".
+func (c *completer) deepChainString(finalName string) string {
+	c.deepChainNames = append(c.deepChainNames, finalName)
+	chainStr := strings.Join(c.deepChainNames, ".")
+	c.deepChainNames = c.deepChainNames[:len(c.deepChainNames)-1]
+	return chainStr
 }
 
 // isParameter returns true if the given *types.Var is a parameter

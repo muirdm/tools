@@ -31,6 +31,9 @@ func _() {
 
 	Foo{Foo{}.B} //@snippet("} ", snipFieldBar, "Bar", "Bar")
 
+	f.Bar //@item(snipDeepBar, "f.Bar", "int", "field")
+	Foo{f} //@snippet("}", snipDeepBar, "f.Bar", "f.Bar")
+
 	var err error
 	err.Error() //@snippet("E", Error, "Error", "Error")
 	f.Baz()     //@snippet("B", snipMethodBaz, "Baz", "Baz")

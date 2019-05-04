@@ -31,6 +31,11 @@ type CompletionItem struct {
 
 	Kind CompletionItemKind
 
+	// Depth is how many levels were searched to find this completion.
+	// For example when completing "foo<>", "fooBar" is depth 0, and
+	// "fooBar.Baz" is depth 1.
+	Depth int
+
 	// Score is the internal relevance score.
 	// A higher score indicates that this completion item is more relevant.
 	Score float64
@@ -144,6 +149,14 @@ type completer struct {
 	// enclosingCompositeLiteral contains information about the composite literal
 	// enclosing the position.
 	enclosingCompositeLiteral *compLitInfo
+
+	// deepChain holds the traversal path as we depth first search through
+	// objects' members looking for exact type matches.
+	deepChain []types.Object
+
+	// deepChainNames holds the names of the deepChain objects. This allows us to
+	// save allocations as we build many deep completion items.
+	deepChainNames []string
 }
 
 type compLitInfo struct {
@@ -194,24 +207,98 @@ func (c *completer) setSurrounding(ident *ast.Ident) {
 	}
 }
 
-// found adds a candidate completion.
-//
-// Only the first candidate of a given name is considered.
-func (c *completer) found(obj types.Object, weight float64) {
+// found adds a candidate completion. If obj's type does not match the expected
+// type, found will search through obj's members for matching objects.
+func (c *completer) found(obj types.Object, score float64) {
 	if obj.Pkg() != nil && obj.Pkg() != c.types && !obj.Exported() {
 		return // inaccessible
 	}
-	if c.seen[obj] {
+
+	// At the top level, dedupe by object.
+	if len(c.deepChain) == 0 {
+		if c.seen[obj] {
+			return
+		}
+		c.seen[obj] = true
+	} else {
+		// When searching deep, just make sure we don't have a cycle in our chain.
+		// We don't dedupe by object because we want to allow both "foo.Baz" and
+		// "bar.Baz" even though "Baz" is represented the same types.Object in both.
+		for _, seenObj := range c.deepChain {
+			if seenObj == obj {
+				return
+			}
+		}
+	}
+
+	matchesType := c.matchingType(obj.Type())
+	if matchesType {
+		score *= highScore
+	}
+
+	_, isType := obj.(*types.TypeName)
+	if !isType && c.preferTypeNames {
+		score *= lowScore
+	}
+
+	if len(c.deepChain) > 0 {
+		// When deep searching other packages we encounter many types. Lower the
+		// score of unwanted types so they don't adulterate our suggestions.
+		if isType && !c.preferTypeNames {
+			score *= lowScore
+		}
+
+		// Lower the score of functions that take arguments so we prefer functions
+		// with no arguments.
+		if sig, ok := obj.Type().Underlying().(*types.Signature); ok {
+			if sig.Params().Len() > 0 {
+				score -= 2 * stdScore
+			}
+		}
+
+		// Favor shallow matches by lowering score according to depth.
+		score -= stdScore * float64(len(c.deepChain))
+	}
+
+	if score < lowScore {
+		score = lowScore
+	}
+
+	// Don't add deep completion items unless they are a type match.
+	if len(c.deepChain) == 0 || matchesType {
+		c.items = append(c.items, c.item(obj, score))
+	}
+
+	// Search for deep matches if we have an expected type, our current object
+	// doesn't already match, and our current object is not a type.
+	if c.expectedType != nil && !matchesType && !isType {
+		c.deepSearch(obj)
+	}
+}
+
+// deepSearch searches through obj's subordinate objects for more
+// completion items.
+func (c *completer) deepSearch(obj types.Object) {
+	// Don't search into embedded fields because their fields were already
+	// included in their parent's fields.
+	if v, ok := obj.(*types.Var); ok && v.Embedded() {
 		return
 	}
-	c.seen[obj] = true
-	if c.matchingType(obj.Type()) {
-		weight *= highScore
+
+	c.deepChain = append(c.deepChain, obj)
+	c.deepChainNames = append(c.deepChainNames, obj.Name())
+
+	switch obj := obj.(type) {
+	case *types.PkgName:
+		c.packageMembers(obj)
+	default:
+		// For now it is okay to assume obj is addressable since we don't search beyond
+		// function calls.
+		c.methodsAndFields(obj.Type(), true)
 	}
-	if _, ok := obj.(*types.TypeName); !ok && c.preferTypeNames {
-		weight *= lowScore
-	}
-	c.items = append(c.items, c.item(obj, weight))
+
+	c.deepChain = c.deepChain[:len(c.deepChain)-1]
+	c.deepChainNames = c.deepChainNames[:len(c.deepChainNames)-1]
 }
 
 // Completion returns a list of possible candidates for completion, given a
@@ -349,11 +436,7 @@ func (c *completer) selector(sel *ast.SelectorExpr) error {
 	// Is sel a qualified identifier?
 	if id, ok := sel.X.(*ast.Ident); ok {
 		if pkgname, ok := c.info.Uses[id].(*types.PkgName); ok {
-			// Enumerate package members.
-			scope := pkgname.Imported().Scope()
-			for _, name := range scope.Names() {
-				c.found(scope.Lookup(name), stdScore)
-			}
+			c.packageMembers(pkgname)
 			return nil
 		}
 	}
@@ -364,22 +447,33 @@ func (c *completer) selector(sel *ast.SelectorExpr) error {
 		return fmt.Errorf("cannot resolve %s", sel.X)
 	}
 
-	// Add methods of T.
-	mset := types.NewMethodSet(tv.Type)
+	return c.methodsAndFields(tv.Type, tv.Addressable())
+}
+
+func (c *completer) packageMembers(pkg *types.PkgName) {
+	scope := pkg.Imported().Scope()
+	for _, name := range scope.Names() {
+		c.found(scope.Lookup(name), stdScore)
+	}
+}
+
+func (c *completer) methodsAndFields(typ types.Type, addressable bool) error {
+	var mset *types.MethodSet
+
+	if addressable && !types.IsInterface(typ) && !isPointer(typ) {
+		// Add methods of *T, which includes methods with receiver T.
+		mset = types.NewMethodSet(types.NewPointer(typ))
+	} else {
+		// Add methods of T.
+		mset = types.NewMethodSet(typ)
+	}
+
 	for i := 0; i < mset.Len(); i++ {
 		c.found(mset.At(i).Obj(), stdScore)
 	}
 
-	// Add methods of *T.
-	if tv.Addressable() && !types.IsInterface(tv.Type) && !isPointer(tv.Type) {
-		mset := types.NewMethodSet(types.NewPointer(tv.Type))
-		for i := 0; i < mset.Len(); i++ {
-			c.found(mset.At(i).Obj(), stdScore)
-		}
-	}
-
 	// Add fields of T.
-	for _, f := range fieldSelections(tv.Type) {
+	for _, f := range fieldSelections(typ) {
 		c.found(f, stdScore)
 	}
 	return nil
