@@ -69,7 +69,7 @@ func (s *Server) applyChanges(ctx context.Context, params *protocol.DidChangeTex
 	uri := span.NewURI(params.TextDocument.URI)
 	content, _, err := s.session.GetFile(uri).Read(ctx)
 	if err != nil {
-		return "", jsonrpc2.NewErrorf(jsonrpc2.CodeInternalError, "file not found")
+		return "", jsonrpc2.NewErrorf(jsonrpc2.CodeInternalError, "file not found (%v)", err)
 	}
 	fset := s.session.Cache().FileSet()
 	for _, change := range params.ContentChanges {

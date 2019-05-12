@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"golang.org/x/tools/go/ast/astutil"
+	"golang.org/x/tools/internal/lsp/fuzzymatch"
 	"golang.org/x/tools/internal/lsp/snippet"
 	"golang.org/x/tools/internal/span"
 )
@@ -149,6 +150,8 @@ type completer struct {
 
 	// deepState contains the current state of our deep completion search.
 	deepState deepCompletionState
+
+	methodSetCache map[methodSetKey]*types.MethodSet
 }
 
 type compLitInfo struct {
@@ -227,6 +230,12 @@ func (c *completer) setSurrounding(ident *ast.Ident) {
 		Range:   span.NewRange(c.view.Session().Cache().FileSet(), ident.Pos(), ident.End()),
 		Cursor:  c.pos,
 	}
+
+}
+
+type methodSetKey struct {
+	typ         types.Type
+	addressable bool
 }
 
 func (c *completer) inDeepCompletion() bool {
@@ -275,6 +284,16 @@ func (c *completer) found(obj types.Object, score float64) {
 	// Favor shallow matches by lowering weight according to depth.
 	cand.score -= stdScore * float64(len(c.deepState.chain))
 
+	var prefix string
+	if c.surrounding != nil {
+		prefix = c.surrounding.Prefix()
+	}
+	if len(prefix) > 0 {
+		match, fuzzyScore := fuzzymatch.Match(prefix, c.deepState.chainString(obj.Name()))
+		if match {
+			cand.score += float64(fuzzyScore)
+		}
+	}
 	c.items = append(c.items, c.item(cand))
 
 	// Don't search into type names.
@@ -366,6 +385,7 @@ func Completion(ctx context.Context, f GoFile, pos token.Pos) ([]CompletionItem,
 		seen:                      make(map[types.Object]bool),
 		enclosingFunction:         enclosingFunction(path, pos, pkg.GetTypesInfo()),
 		enclosingCompositeLiteral: clInfo,
+		methodSetCache:            make(map[methodSetKey]*types.MethodSet),
 	}
 
 	// Set the filter surrounding.
@@ -481,14 +501,16 @@ func (c *completer) packageMembers(pkg *types.PkgName) {
 }
 
 func (c *completer) methodsAndFields(typ types.Type, addressable bool) error {
-	var mset *types.MethodSet
-
-	if addressable && !types.IsInterface(typ) && !isPointer(typ) {
-		// Add methods of *T, which includes methods with receiver T.
-		mset = types.NewMethodSet(types.NewPointer(typ))
-	} else {
-		// Add methods of T.
-		mset = types.NewMethodSet(typ)
+	mset := c.methodSetCache[methodSetKey{typ, addressable}]
+	if mset == nil {
+		if addressable && !types.IsInterface(typ) && !isPointer(typ) {
+			// Add methods of *T, which includes methods with receiver T.
+			mset = types.NewMethodSet(types.NewPointer(typ))
+		} else {
+			// Add methods of T.
+			mset = types.NewMethodSet(typ)
+		}
+		c.methodSetCache[methodSetKey{typ, addressable}] = mset
 	}
 
 	for i := 0; i < mset.Len(); i++ {
