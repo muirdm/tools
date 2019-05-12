@@ -12,6 +12,7 @@ import (
 	"go/types"
 
 	"golang.org/x/tools/go/ast/astutil"
+	"golang.org/x/tools/internal/lsp/fuzzymatch"
 	"golang.org/x/tools/internal/lsp/snippet"
 	"golang.org/x/tools/internal/span"
 )
@@ -157,6 +158,8 @@ type completer struct {
 	// deepChainNames holds the names of the deepChain objects. This allows us to
 	// save allocations as we build many deep completion items.
 	deepChainNames []string
+
+	methodSetCache map[methodSetKey]*types.MethodSet
 }
 
 type compLitInfo struct {
@@ -205,6 +208,12 @@ func (c *completer) setSurrounding(ident *ast.Ident) {
 		Range:   span.NewRange(c.view.Session().Cache().FileSet(), ident.Pos(), ident.End()),
 		Cursor:  c.pos,
 	}
+
+}
+
+type methodSetKey struct {
+	typ         types.Type
+	addressable bool
 }
 
 // found adds a candidate completion. If obj's type does not match the expected
@@ -264,14 +273,23 @@ func (c *completer) found(obj types.Object, score float64) {
 		score = lowScore
 	}
 
-	// Don't add deep completion items unless they are a type match.
-	if len(c.deepChain) == 0 || matchesType {
+	var prefix string
+	if c.surrounding != nil {
+		prefix = c.surrounding.Prefix()
+	}
+	if len(prefix) > 0 {
+		match, fuzzyScore := fuzzymatch.Match(prefix, c.deepChainString(obj.Name()))
+		if match {
+			c.items = append(c.items, c.item(obj, score+float64(fuzzyScore)))
+		}
+	} else if matchesType || len(c.deepChain) == 0 {
+		// Don't add deep completion items unless they are a type match.
 		c.items = append(c.items, c.item(obj, score))
 	}
 
-	// Search for deep matches if we have an expected type, our current object
-	// doesn't already match, and our current object is not a type.
-	if c.expectedType != nil && !matchesType && !isType {
+	// Search for deep matches if our current object doesn't match the expected
+	// type (or we have no expected type) and the current object is not a type.
+	if !matchesType && !isType {
 		c.deepSearch(obj)
 	}
 }
@@ -347,6 +365,7 @@ func Completion(ctx context.Context, f GoFile, pos token.Pos) ([]CompletionItem,
 		enclosingFunction:         enclosingFunction(path, pos, pkg.GetTypesInfo()),
 		preferTypeNames:           preferTypeNames(path, pos),
 		enclosingCompositeLiteral: clInfo,
+		methodSetCache:            make(map[methodSetKey]*types.MethodSet),
 	}
 
 	// Set the filter surrounding.
@@ -458,14 +477,16 @@ func (c *completer) packageMembers(pkg *types.PkgName) {
 }
 
 func (c *completer) methodsAndFields(typ types.Type, addressable bool) error {
-	var mset *types.MethodSet
-
-	if addressable && !types.IsInterface(typ) && !isPointer(typ) {
-		// Add methods of *T, which includes methods with receiver T.
-		mset = types.NewMethodSet(types.NewPointer(typ))
-	} else {
-		// Add methods of T.
-		mset = types.NewMethodSet(typ)
+	mset := c.methodSetCache[methodSetKey{typ, addressable}]
+	if mset == nil {
+		if addressable && !types.IsInterface(typ) && !isPointer(typ) {
+			// Add methods of *T, which includes methods with receiver T.
+			mset = types.NewMethodSet(types.NewPointer(typ))
+		} else {
+			// Add methods of T.
+			mset = types.NewMethodSet(typ)
+		}
+		c.methodSetCache[methodSetKey{typ, addressable}] = mset
 	}
 
 	for i := 0; i < mset.Len(); i++ {

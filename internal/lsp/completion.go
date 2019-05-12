@@ -8,7 +8,6 @@ import (
 	"context"
 	"fmt"
 	"sort"
-	"strings"
 
 	"golang.org/x/tools/internal/lsp/protocol"
 	"golang.org/x/tools/internal/lsp/source"
@@ -55,7 +54,9 @@ func (s *Server) completion(ctx context.Context, params *protocol.CompletionPara
 		}
 	}
 	return &protocol.CompletionList{
-		IsIncomplete: false,
+		// We limit deep completion candidates, so results are not complete. This
+		// causes to re-request completions after every keystroke.
+		IsIncomplete: true,
 		Items:        toProtocolCompletionItems(items, prefix, insertionRng, s.insertTextFormat, s.usePlaceholders),
 	}, nil
 }
@@ -66,15 +67,13 @@ func toProtocolCompletionItems(candidates []source.CompletionItem, prefix string
 	sort.SliceStable(candidates, func(i, j int) bool {
 		return candidates[i].Score > candidates[j].Score
 	})
+
 	var (
 		items    = make([]protocol.CompletionItem, 0, len(candidates))
 		seenDeep int
 	)
+
 	for i, candidate := range candidates {
-		// Match against the label.
-		if !strings.HasPrefix(candidate.Label, prefix) {
-			continue
-		}
 
 		// Limit the number of deep completions to not overwhelm the user in cases
 		// with dozens of deep completion matches.
@@ -89,6 +88,7 @@ func toProtocolCompletionItems(candidates []source.CompletionItem, prefix string
 		if insertTextFormat == protocol.SnippetTextFormat {
 			insertText = candidate.Snippet(usePlaceholders)
 		}
+
 		item := protocol.CompletionItem{
 			Label:  candidate.Label,
 			Detail: candidate.Detail,

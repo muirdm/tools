@@ -55,13 +55,13 @@ func (c *completer) item(obj types.Object, score float64) CompletionItem {
 			break
 		}
 		params := formatParams(sig.Params(), sig.Variadic(), c.qf)
-
 		plainSnippet, placeholderSnippet = c.functionCallSnippets(label, params)
-
 		results, writeParens := formatResults(sig.Results(), c.qf)
 		label, detail = formatFunction(obj.Name(), params, results, writeParens)
+
 		// Add back the deep completion.
 		label = c.deepChainString(label)
+
 		kind = FunctionCompletionItem
 		if sig.Recv() != nil {
 			kind = MethodCompletionItem
