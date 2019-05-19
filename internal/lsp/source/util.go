@@ -213,3 +213,24 @@ func formatFunction(name string, params []string, results []string, writeResultP
 
 	return label.String(), detail.String()
 }
+
+// typeConversions returns the type being converted to if call is a type
+// conversion expression.
+func typeConversion(call *ast.CallExpr, info *types.Info) types.Type {
+	var ident *ast.Ident
+	switch expr := call.Fun.(type) {
+	case *ast.Ident:
+		ident = expr
+	case *ast.SelectorExpr:
+		ident = expr.Sel
+	default:
+		return nil
+	}
+
+	// Type conversion (e.g. "float64(foo)").
+	if fun, _ := info.ObjectOf(ident).(*types.TypeName); fun != nil {
+		return fun.Type()
+	}
+
+	return nil
+}
