@@ -10,6 +10,7 @@ import (
 	"go/ast"
 	"go/token"
 	"go/types"
+	"strings"
 
 	"golang.org/x/tools/go/ast/astutil"
 	"golang.org/x/tools/internal/lsp/snippet"
@@ -30,6 +31,11 @@ type CompletionItem struct {
 	InsertText string
 
 	Kind CompletionItemKind
+
+	// Depth is how many levels were searched to find this completion.
+	// For example when completing "foo<>", "fooBar" is depth 0, and
+	// "fooBar.Baz" is depth 1.
+	Depth int
 
 	// Score is the internal relevance score.
 	// A higher score indicates that this completion item is more relevant.
@@ -140,6 +146,9 @@ type completer struct {
 	// enclosingCompositeLiteral contains information about the composite literal
 	// enclosing the position.
 	enclosingCompositeLiteral *compLitInfo
+
+	// deepState contains the current state of our deep completion search.
+	deepState deepCompletionState
 }
 
 type compLitInfo struct {
@@ -161,6 +170,36 @@ type compLitInfo struct {
 	// "SomeStruct{<>}" will be inKey=false, but maybeInFieldName=true
 	// because we _could_ be completing a field name.
 	maybeInFieldName bool
+}
+
+type deepCompletionState struct {
+	// chain holds the traversal path as we do a depth-first search through
+	// objects' members looking for exact type matches.
+	chain []types.Object
+
+	// chainNames holds the names of the chain objects. This allows us to
+	// save allocations as we build many deep completion items.
+	chainNames []string
+}
+
+// push pushes obj onto our search stack.
+func (s *deepCompletionState) push(obj types.Object) {
+	s.chain = append(s.chain, obj)
+	s.chainNames = append(s.chainNames, obj.Name())
+}
+
+// pop pops the last object off our search stack.
+func (s *deepCompletionState) pop() {
+	s.chain = s.chain[:len(s.chain)-1]
+	s.chainNames = s.chainNames[:len(s.chainNames)-1]
+}
+
+// chainString joins the chain of objects' names together on ".".
+func (s *deepCompletionState) chainString(finalName string) string {
+	s.chainNames = append(s.chainNames, finalName)
+	chainStr := strings.Join(s.chainNames, ".")
+	s.chainNames = s.chainNames[:len(s.chainNames)-1]
+	return chainStr
 }
 
 // A Selection represents the cursor position and surrounding identifier.
@@ -190,32 +229,58 @@ func (c *completer) setSurrounding(ident *ast.Ident) {
 	}
 }
 
-// found adds a candidate completion.
-//
-// Only the first candidate of a given name is considered.
+func (c *completer) inDeepCompletion() bool {
+	return len(c.deepState.chain) > 0
+}
+
+// found adds a candidate completion. We will also search through the object's
+// members for more candidates.
 func (c *completer) found(obj types.Object, score float64) {
 	if obj.Pkg() != nil && obj.Pkg() != c.types && !obj.Exported() {
 		return // inaccessible
 	}
-	if c.seen[obj] {
-		return
+
+	if c.inDeepCompletion() {
+		// When searching deep, just make sure we don't have a cycle in our chain.
+		// We don't dedupe by object because we want to allow both "foo.Baz" and
+		// "bar.Baz" even though "Baz" is represented the same types.Object in both.
+		for _, seenObj := range c.deepState.chain {
+			if seenObj == obj {
+				return
+			}
+		}
+	} else {
+		// At the top level, dedupe by object.
+		if c.seen[obj] {
+			return
+		}
+		c.seen[obj] = true
 	}
-	c.seen[obj] = true
 
 	cand := candidate{
 		obj:   obj,
 		score: score,
 	}
 
-	if c.matchingType(&cand) {
+	matchesType := c.matchingType(&cand)
+	if matchesType {
 		cand.score *= highScore
 	}
 
-	if c.wantTypeName() && !isTypeName(obj) {
+	isType := isTypeName(obj)
+	if c.wantTypeName() && !isType {
 		cand.score *= lowScore
 	}
 
+	// Favor shallow matches by lowering weight according to depth.
+	cand.score -= stdScore * float64(len(c.deepState.chain))
+
 	c.items = append(c.items, c.item(cand))
+
+	// Don't search into type names.
+	if !isType {
+		c.deepSearch(obj)
+	}
 }
 
 // candidate represents a completion candidate.
@@ -229,6 +294,31 @@ type candidate struct {
 	// expandFuncCall is true if obj should be invoked in the completion.
 	// For example, expandFuncCall=true yields "foo()", expandFuncCall=false yields "foo".
 	expandFuncCall bool
+}
+
+// deepSearch searches through obj's subordinate objects for more
+// completion items.
+func (c *completer) deepSearch(obj types.Object) {
+	// Don't search embedded fields because they were already included in their
+	// parent's fields.
+	if v, ok := obj.(*types.Var); ok && v.Embedded() {
+		return
+	}
+
+	// Push this object onto our search stack.
+	c.deepState.push(obj)
+
+	switch obj := obj.(type) {
+	case *types.PkgName:
+		c.packageMembers(obj)
+	default:
+		// For now it is okay to assume obj is addressable since we don't search beyond
+		// function calls.
+		c.methodsAndFields(obj.Type(), true)
+	}
+
+	// Pop the object off our search stack.
+	c.deepState.pop()
 }
 
 // Completion returns a list of possible candidates for completion, given a
@@ -369,11 +459,7 @@ func (c *completer) selector(sel *ast.SelectorExpr) error {
 	// Is sel a qualified identifier?
 	if id, ok := sel.X.(*ast.Ident); ok {
 		if pkgname, ok := c.info.Uses[id].(*types.PkgName); ok {
-			// Enumerate package members.
-			scope := pkgname.Imported().Scope()
-			for _, name := range scope.Names() {
-				c.found(scope.Lookup(name), stdScore)
-			}
+			c.packageMembers(pkgname)
 			return nil
 		}
 	}
@@ -384,22 +470,33 @@ func (c *completer) selector(sel *ast.SelectorExpr) error {
 		return fmt.Errorf("cannot resolve %s", sel.X)
 	}
 
-	// Add methods of T.
-	mset := types.NewMethodSet(tv.Type)
+	return c.methodsAndFields(tv.Type, tv.Addressable())
+}
+
+func (c *completer) packageMembers(pkg *types.PkgName) {
+	scope := pkg.Imported().Scope()
+	for _, name := range scope.Names() {
+		c.found(scope.Lookup(name), stdScore)
+	}
+}
+
+func (c *completer) methodsAndFields(typ types.Type, addressable bool) error {
+	var mset *types.MethodSet
+
+	if addressable && !types.IsInterface(typ) && !isPointer(typ) {
+		// Add methods of *T, which includes methods with receiver T.
+		mset = types.NewMethodSet(types.NewPointer(typ))
+	} else {
+		// Add methods of T.
+		mset = types.NewMethodSet(typ)
+	}
+
 	for i := 0; i < mset.Len(); i++ {
 		c.found(mset.At(i).Obj(), stdScore)
 	}
 
-	// Add methods of *T.
-	if tv.Addressable() && !types.IsInterface(tv.Type) && !isPointer(tv.Type) {
-		mset := types.NewMethodSet(types.NewPointer(tv.Type))
-		for i := 0; i < mset.Len(); i++ {
-			c.found(mset.At(i).Obj(), stdScore)
-		}
-	}
-
 	// Add fields of T.
-	for _, f := range fieldSelections(tv.Type) {
+	for _, f := range fieldSelections(typ) {
 		c.found(f, stdScore)
 	}
 	return nil
