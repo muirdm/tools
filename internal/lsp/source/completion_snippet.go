@@ -96,3 +96,22 @@ func (c *completer) functionCallSnippets(name string, params []string) (*snippet
 
 	return plain, placeholder
 }
+
+// indexSnippets calculates the plain and placeholder snippets for index expressions.
+func (c *completer) indexSnippets(name, indexPlaceholder string) (*snippet.Builder, *snippet.Builder) {
+	plain, placeholder := &snippet.Builder{}, &snippet.Builder{}
+
+	// A plain snippet turns "someVa<>" into "someVar[<>]"
+	plain.WriteText(name + "[")
+	plain.WritePlaceholder(nil)
+	plain.WriteText("]")
+
+	// A placeholder snippet turns "someVa<>" into "someVar[<string>]"
+	placeholder.WriteText(name + "[")
+	placeholder.WritePlaceholder(func(b *snippet.Builder) {
+		b.WriteText(indexPlaceholder)
+	})
+	placeholder.WriteText("]")
+
+	return plain, placeholder
+}

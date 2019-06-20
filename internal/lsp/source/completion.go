@@ -229,6 +229,14 @@ type candidate struct {
 	// expandFuncCall is true if obj should be invoked in the completion.
 	// For example, expandFuncCall=true yields "foo()", expandFuncCall=false yields "foo".
 	expandFuncCall bool
+
+	// expandIndex is true if obj should be expanded to an index expression.
+	// For example, "foo" would be expanded to "foo[]".
+	expandIndex bool
+
+	// expandChannelRead is true if obj should be expanded to a channel read.
+	// For example, "foo" would be expaneded to "<-foo".
+	expandChannelRead bool
 }
 
 // Completion returns a list of possible candidates for completion, given a
@@ -963,12 +971,35 @@ func (c *completer) matchingType(cand *candidate) bool {
 		return true
 	}
 
-	// Try using a function's return type as its type.
-	if sig, ok := objType.Underlying().(*types.Signature); ok && sig.Results().Len() == 1 {
-		if typeMatches(sig.Results().At(0).Type()) {
-			// If obj's return value matches the expected type, we need to invoke obj
-			// in the completion.
+	switch objType := objType.Underlying().(type) {
+	case *types.Signature:
+		// Check if invoking the function would produce the expected type.
+		if objType.Results().Len() == 1 && typeMatches(objType.Results().At(0).Type()) {
 			cand.expandFuncCall = true
+			return true
+		}
+	case *types.Map:
+		// Check if indexing into the map would yield the expected type.
+		if typeMatches(objType.Elem()) {
+			cand.expandIndex = true
+			return true
+		}
+	case *types.Slice:
+		// Check if indexing into the slice would yield the expected type.
+		if typeMatches(objType.Elem()) {
+			cand.expandIndex = true
+			return true
+		}
+	case *types.Array:
+		// Check if indexing into the array would yield the expected type.
+		if typeMatches(objType.Elem()) {
+			cand.expandIndex = true
+			return true
+		}
+	case *types.Chan:
+		// Check if reading from the channel would yield the expected type.
+		if objType.Dir() != types.SendOnly && typeMatches(objType.Elem()) {
+			cand.expandChannelRead = true
 			return true
 		}
 	}

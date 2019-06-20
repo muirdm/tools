@@ -64,6 +64,22 @@ func (c *completer) item(cand candidate) CompletionItem {
 		if sig, ok := obj.Type().Underlying().(*types.Signature); ok && cand.expandFuncCall {
 			expandFuncCall(sig)
 		}
+
+		if _, ok := obj.Type().Underlying().(*types.Chan); ok && cand.expandChannelRead {
+			plainSnippet = &snippet.Builder{}
+			plainSnippet.WriteText("<-" + insert)
+			placeholderSnippet = plainSnippet
+		}
+
+		if cand.expandIndex {
+			switch typ := obj.Type().Underlying().(type) {
+			case *types.Map:
+				mapKeyStr := types.TypeString(typ.Key(), c.qf)
+				plainSnippet, placeholderSnippet = c.indexSnippets(obj.Name(), mapKeyStr)
+			case *types.Slice, *types.Array:
+				plainSnippet, placeholderSnippet = c.indexSnippets(obj.Name(), "")
+			}
+		}
 	case *types.Func:
 		sig, ok := obj.Type().Underlying().(*types.Signature)
 		if !ok {
