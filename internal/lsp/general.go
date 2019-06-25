@@ -202,9 +202,10 @@ func (s *Server) processConfig(view source.View, config interface{}) error {
 		}
 	}
 	// Check if deep completions are enabled.
-	if useDeepCompletions, ok := c["useDeepCompletions"].(bool); ok {
-		s.useDeepCompletions = useDeepCompletions
-	}
+	// XXX
+	//	if useDeepCompletions, ok := c["useDeepCompletions"].(bool); ok {
+	s.useDeepCompletions = true
+	//	}
 	return nil
 }
 
