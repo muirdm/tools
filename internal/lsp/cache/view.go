@@ -252,15 +252,15 @@ func (f *goFile) invalidateAST(ctx context.Context) {
 	// Remove the package and all of its reverse dependencies from the cache.
 	for id, pkg := range pkgs {
 		if pkg != nil {
-			f.view.remove(ctx, id, map[packageID]struct{}{})
+			f.view.invalidatePackage(ctx, id, map[packageID]struct{}{})
 		}
 	}
 }
 
-// remove invalidates a package and its reverse dependencies in the view's
-// package cache. It is assumed that the caller has locked both the mutexes
+// invalidatePackage invalidates a package and its reverse dependencies in the
+// view's package cache. It is assumed that the caller has locked the mutexes
 // of both the mcache and the pcache.
-func (v *view) remove(ctx context.Context, id packageID, seen map[packageID]struct{}) {
+func (v *view) invalidatePackage(ctx context.Context, id packageID, seen map[packageID]struct{}) {
 	if _, ok := seen[id]; ok {
 		return
 	}
@@ -270,7 +270,7 @@ func (v *view) remove(ctx context.Context, id packageID, seen map[packageID]stru
 	}
 	seen[id] = struct{}{}
 	for parentID := range m.parents {
-		v.remove(ctx, parentID, seen)
+		v.invalidatePackage(ctx, parentID, seen)
 	}
 	// All of the files in the package may also be holding a pointer to the
 	// invalidated package.

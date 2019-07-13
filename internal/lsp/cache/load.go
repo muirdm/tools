@@ -33,6 +33,15 @@ func (v *view) loadParseTypecheck(ctx context.Context, f *goFile) ([]packages.Er
 	if meta == nil {
 		return nil, nil
 	}
+
+	// Clear the pcache to ensure we reparse and type check this file's
+	// packages.
+	v.pcache.mu.Lock()
+	for id := range meta {
+		v.invalidatePackage(ctx, id, make(map[packageID]struct{}))
+	}
+	v.pcache.mu.Unlock()
+
 	for id, m := range meta {
 		imp := &importer{
 			view:          v,
@@ -105,6 +114,7 @@ func (v *view) checkMetadata(ctx context.Context, f *goFile) (map[packageID]*met
 		if len(pkg.Errors) > 0 {
 			return nil, pkg.Errors, fmt.Errorf("package %s has errors, skipping type-checking", pkg.PkgPath)
 		}
+
 		// Build the import graph for this package.
 		if err := v.link(ctx, packagePath(pkg.PkgPath), pkg, nil, missingImports); err != nil {
 			return nil, nil, err
@@ -143,12 +153,8 @@ func (v *view) runGopackages(ctx context.Context, f *goFile) (result bool) {
 	defer func() {
 		// Clear metadata if we are intending to re-run go/packages.
 		if result {
-			// Reset the file's metadata and type information if we are re-running `go list`.
 			for k := range f.meta {
 				delete(f.meta, k)
-			}
-			for k := range f.pkgs {
-				delete(f.pkgs, k)
 			}
 		}
 
@@ -198,15 +204,7 @@ func (v *view) link(ctx context.Context, pkgPath packagePath, pkg *packages.Pack
 	id := packageID(pkg.ID)
 	m, ok := v.mcache.packages[id]
 
-	// If a file was added or deleted we need to invalidate the package cache
-	// so relevant packages get parsed and type-checked again.
-	if ok && !filenamesIdentical(m.files, pkg.CompiledGoFiles) {
-		v.pcache.mu.Lock()
-		v.remove(ctx, id, make(map[packageID]struct{}))
-		v.pcache.mu.Unlock()
-	}
-
-	// If we haven't seen this package before.
+	// If we haven't seen this package before, initialize metadata.
 	if !ok {
 		m = &metadata{
 			pkgPath:    pkgPath,
@@ -218,6 +216,7 @@ func (v *view) link(ctx context.Context, pkgPath packagePath, pkg *packages.Pack
 		v.mcache.packages[id] = m
 		v.mcache.ids[pkgPath] = id
 	}
+
 	// Reset any field that could have changed across calls to packages.Load.
 	m.name = pkg.Name
 	m.files = pkg.CompiledGoFiles
@@ -270,22 +269,4 @@ func (v *view) link(ctx context.Context, pkgPath packagePath, pkg *packages.Pack
 		delete(child.parents, id)
 	}
 	return nil
-}
-
-// filenamesIdentical reports whether two sets of file names are identical.
-func filenamesIdentical(oldFiles, newFiles []string) bool {
-	if len(oldFiles) != len(newFiles) {
-		return false
-	}
-	oldByName := make(map[string]struct{}, len(oldFiles))
-	for _, filename := range oldFiles {
-		oldByName[filename] = struct{}{}
-	}
-	for _, newFilename := range newFiles {
-		if _, found := oldByName[newFilename]; !found {
-			return false
-		}
-		delete(oldByName, newFilename)
-	}
-	return len(oldByName) == 0
 }
