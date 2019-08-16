@@ -16,6 +16,7 @@ import (
 	"golang.org/x/tools/internal/lsp/fuzzy"
 	"golang.org/x/tools/internal/lsp/snippet"
 	"golang.org/x/tools/internal/span"
+	"golang.org/x/tools/internal/telemetry/log"
 	"golang.org/x/tools/internal/telemetry/trace"
 	errors "golang.org/x/xerrors"
 )
@@ -192,6 +193,11 @@ type completer struct {
 
 	// matcher matches the candidates against the surrounding prefix.
 	matcher matcher
+
+	// methodSetCache caches the types.NewMethodSet call, which is relatively
+	// expensive and can be called many times for the same type while searching
+	// for deep completions.
+	methodSetCache map[methodSetKey]*types.MethodSet
 }
 
 type compLitInfo struct {
@@ -213,6 +219,11 @@ type compLitInfo struct {
 	// "SomeStruct{<>}" will be inKey=false, but maybeInFieldName=true
 	// because we _could_ be completing a field name.
 	maybeInFieldName bool
+}
+
+type methodSetKey struct {
+	typ         types.Type
+	addressable bool
 }
 
 // A Selection represents the cursor position and surrounding identifier.
@@ -242,9 +253,7 @@ func (c *completer) setSurrounding(ident *ast.Ident) {
 	// Fuzzy matching shares the "useDeepCompletions" config flag, so if deep completions
 	// are enabled then also enable fuzzy matching.
 	if c.deepState.enabled {
-		if c.surrounding.Prefix() != "" {
-			c.matcher = fuzzy.NewMatcher(c.surrounding.Prefix(), fuzzy.Symbol)
-		}
+		c.matcher = fuzzy.NewMatcher(c.surrounding.Prefix(), fuzzy.Symbol)
 	} else {
 		c.matcher = prefixMatcher(strings.ToLower(c.surrounding.Prefix()))
 	}
@@ -252,9 +261,11 @@ func (c *completer) setSurrounding(ident *ast.Ident) {
 
 // found adds a candidate completion. We will also search through the object's
 // members for more candidates.
-func (c *completer) found(obj types.Object, score float64, imp *imports.ImportInfo) error {
+func (c *completer) found(obj types.Object, score float64, imp *imports.ImportInfo) {
 	if obj.Pkg() != nil && obj.Pkg() != c.types && !obj.Exported() {
-		return errors.Errorf("%s is inaccessible from %s", obj.Name(), c.types.Path())
+		// obj is not accessible because it lives in another package and is not
+		// exported. Don't treat it as a completion candidate.
+		return
 	}
 
 	if c.inDeepCompletion() {
@@ -263,13 +274,13 @@ func (c *completer) found(obj types.Object, score float64, imp *imports.ImportIn
 		// "bar.Baz" even though "Baz" is represented the same types.Object in both.
 		for _, seenObj := range c.deepState.chain {
 			if seenObj == obj {
-				return nil
+				return
 			}
 		}
 	} else {
 		// At the top level, dedupe by object.
 		if c.seen[obj] {
-			return nil
+			return
 		}
 		c.seen[obj] = true
 	}
@@ -287,23 +298,23 @@ func (c *completer) found(obj types.Object, score float64, imp *imports.ImportIn
 	// Favor shallow matches by lowering weight according to depth.
 	cand.score -= stdScore * float64(len(c.deepState.chain))
 
-	item, err := c.item(cand)
-	if err != nil {
-		return err
-	}
-	if c.matcher == nil {
-		c.items = append(c.items, item)
-	} else {
-		score := c.matcher.Score(item.Label)
-		if score > 0 {
-			item.Score *= float64(score)
-			c.items = append(c.items, item)
+	cand.name = c.deepState.chainString(obj.Name())
+	matchScore := c.matcher.Score(cand.name)
+	if matchScore > 0 {
+		cand.score *= float64(matchScore)
+
+		// Avoid calling c.item() for deep candidates that wouldn't be in the top
+		// MaxDeepCompletions anyway.
+		if !c.inDeepCompletion() || c.deepState.isHighScore(cand.score) {
+			if item, err := c.item(cand); err == nil {
+				c.items = append(c.items, item)
+			} else {
+				log.Error(c.ctx, "error generating completion item", err)
+			}
 		}
 	}
 
 	c.deepSearch(obj)
-
-	return nil
 }
 
 // candidate represents a completion candidate.
@@ -313,6 +324,9 @@ type candidate struct {
 
 	// score is used to rank candidates.
 	score float64
+
+	// name is the deep object name path, e.g. "foo.bar"
+	name string
 
 	// expandFuncCall is true if obj should be invoked in the completion.
 	// For example, expandFuncCall=true yields "foo()", expandFuncCall=false yields "foo".
@@ -380,6 +394,9 @@ func Completion(ctx context.Context, view View, f GoFile, pos token.Pos, opts Co
 		enclosingFunction:         enclosingFunction(path, pos, pkg.GetTypesInfo()),
 		enclosingCompositeLiteral: clInfo,
 		opts:                      opts,
+		// default to a matcher that always matches
+		matcher:        prefixMatcher(""),
+		methodSetCache: make(map[methodSetKey]*types.MethodSet),
 	}
 
 	c.deepState.enabled = opts.DeepComplete
@@ -497,14 +514,16 @@ func (c *completer) packageMembers(pkg *types.PkgName) {
 }
 
 func (c *completer) methodsAndFields(typ types.Type, addressable bool) error {
-	var mset *types.MethodSet
-
-	if addressable && !types.IsInterface(typ) && !isPointer(typ) {
-		// Add methods of *T, which includes methods with receiver T.
-		mset = types.NewMethodSet(types.NewPointer(typ))
-	} else {
-		// Add methods of T.
-		mset = types.NewMethodSet(typ)
+	mset := c.methodSetCache[methodSetKey{typ, addressable}]
+	if mset == nil {
+		if addressable && !types.IsInterface(typ) && !isPointer(typ) {
+			// Add methods of *T, which includes methods with receiver T.
+			mset = types.NewMethodSet(types.NewPointer(typ))
+		} else {
+			// Add methods of T.
+			mset = types.NewMethodSet(typ)
+		}
+		c.methodSetCache[methodSetKey{typ, addressable}] = mset
 	}
 
 	for i := 0; i < mset.Len(); i++ {

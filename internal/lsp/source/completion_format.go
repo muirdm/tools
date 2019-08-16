@@ -25,11 +25,11 @@ func (c *completer) item(cand candidate) (CompletionItem, error) {
 
 	// Handle builtin types separately.
 	if obj.Parent() == types.Universe {
-		return c.formatBuiltin(cand)
+		return c.formatBuiltin(cand), nil
 	}
 
 	var (
-		label              = c.deepState.chainString(obj.Name())
+		label              = cand.name
 		detail             = types.TypeString(obj.Type(), c.qf)
 		insert             = label
 		kind               CompletionItemKind
@@ -171,7 +171,7 @@ func (c *completer) isParameter(v *types.Var) bool {
 	return false
 }
 
-func (c *completer) formatBuiltin(cand candidate) (CompletionItem, error) {
+func (c *completer) formatBuiltin(cand candidate) CompletionItem {
 	obj := cand.obj
 	item := CompletionItem{
 		Label:      obj.Name(),
@@ -201,7 +201,7 @@ func (c *completer) formatBuiltin(cand candidate) (CompletionItem, error) {
 	case *types.Nil:
 		item.Kind = VariableCompletionItem
 	}
-	return item, nil
+	return item
 }
 
 var replacer = strings.NewReplacer(
