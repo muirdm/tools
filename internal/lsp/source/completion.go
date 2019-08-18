@@ -10,6 +10,7 @@ import (
 	"go/token"
 	"go/types"
 	"strings"
+	"time"
 
 	"golang.org/x/tools/go/ast/astutil"
 	"golang.org/x/tools/internal/imports"
@@ -121,6 +122,12 @@ const (
 
 	// lowScore indicates an irrelevant or not useful completion item.
 	lowScore float64 = 0.01
+
+	// completionBudget is the soft latency goal for completion requests. Most
+	// requests finish in a couple milliseconds, but in some cases deep
+	// completions can take much longer. As we use up our budget we dynamically
+	// reduce the search scope to ensure we return timely results.
+	completionBudget = 100 * time.Millisecond
 )
 
 // matcher matches a candidate's label against the user input.
@@ -198,6 +205,10 @@ type completer struct {
 	// expensive and can be called many times for the same type while searching
 	// for deep completions.
 	methodSetCache map[methodSetKey]*types.MethodSet
+
+	// startTime is when we started processing this completion request. It does
+	// not include any time the request spent in the queue.
+	startTime time.Time
 }
 
 type compLitInfo struct {
@@ -285,6 +296,12 @@ func (c *completer) found(obj types.Object, score float64, imp *imports.ImportIn
 		c.seen[obj] = true
 	}
 
+	// If we are running out of budgeted time we must limit our search for deep
+	// completion candidates.
+	if c.shouldPrune() {
+		return
+	}
+
 	cand := candidate{
 		obj:   obj,
 		score: score,
@@ -354,6 +371,8 @@ func Completion(ctx context.Context, view View, f GoFile, pos token.Pos, opts Co
 	ctx, done := trace.StartSpan(ctx, "source.Completion")
 	defer done()
 
+	startTime := time.Now()
+
 	file, err := f.GetAST(ctx, ParseFull)
 	if file == nil {
 		return nil, nil, err
@@ -397,6 +416,7 @@ func Completion(ctx context.Context, view View, f GoFile, pos token.Pos, opts Co
 		// default to a matcher that always matches
 		matcher:        prefixMatcher(""),
 		methodSetCache: make(map[methodSetKey]*types.MethodSet),
+		startTime:      startTime,
 	}
 
 	c.deepState.enabled = opts.DeepComplete
