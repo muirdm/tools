@@ -305,6 +305,10 @@ func (c *completer) found(obj types.Object, score float64, imp *imports.ImportIn
 
 	if c.matchingType(&cand) {
 		cand.score *= highScore
+	} else if isTypeName(obj) {
+		// If obj is a *types.TypeName that didn't otherwise match, check
+		// if a literal object of this type makes a good candidate.
+		c.literal(obj.Type())
 	}
 
 	// Favor shallow matches by lowering weight according to depth.
@@ -462,6 +466,17 @@ func Completion(ctx context.Context, view View, f GoFile, pos protocol.Position,
 	}
 
 	c.expectedType = expectedType(c)
+
+	if c.expectedType.objType != nil {
+		// If we have an expected type and it is _not_ a named type, see
+		// if an object literal makes a good candidate. Named types are
+		// handled during the normal lexical object search. For example,
+		// if our expected type is "[]int", this will add a candidate of
+		// "[]int{}".
+		if _, named := c.expectedType.objType.(*types.Named); !named {
+			c.literal(c.expectedType.objType)
+		}
+	}
 
 	// Struct literals are handled entirely separately.
 	if c.wantStructFieldCompletions() {
