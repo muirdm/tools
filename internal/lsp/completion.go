@@ -29,6 +29,7 @@ func (s *Server) completion(ctx context.Context, params *protocol.CompletionPara
 		NoDocumentation:       !s.wantCompletionDocumentation,
 		WantFullDocumentation: s.hoverKind == fullDocumentation,
 		WantUnimported:        s.wantUnimportedCompletions,
+		WantPlaceholders:      s.usePlaceholders,
 	})
 	if err != nil {
 		log.Print(ctx, "no completions found", tag.Of("At", params.Position), tag.Of("Failure", err))
@@ -73,9 +74,10 @@ func (s *Server) toProtocolCompletionItems(candidates []source.CompletionItem, r
 			numDeepCompletionsSeen++
 		}
 		insertText := candidate.InsertText
-		if s.insertTextFormat == protocol.SnippetTextFormat {
-			insertText = candidate.Snippet(s.usePlaceholders)
+		if s.insertTextFormat == protocol.SnippetTextFormat && candidate.Snippet != nil {
+			insertText = candidate.Snippet.String()
 		}
+
 		item := protocol.CompletionItem{
 			Label:  candidate.Label,
 			Detail: candidate.Detail,

@@ -55,21 +55,9 @@ type CompletionItem struct {
 	// A higher score indicates that this completion item is more relevant.
 	Score float64
 
-	// Snippet is the LSP snippet for the completion item, without placeholders.
-	// The LSP specification contains details about LSP snippets.
-	// For example, a snippet for a function with the following signature:
-	//
-	//     func foo(a, b, c int)
-	//
-	// would be:
-	//
-	//     foo(${1:})
-	//
-	plainSnippet *snippet.Builder
-
-	// PlaceholderSnippet is the LSP snippet for the completion ite, containing
-	// placeholders. The LSP specification contains details about LSP snippets.
-	// For example, a placeholder snippet for a function with the following signature:
+	// Snippet is the LSP snippet for the completion item. The LSP
+	// specification contains details about LSP snippets. For example, a
+	// snippet for a function with the following signature:
 	//
 	//     func foo(a, b, c int)
 	//
@@ -77,24 +65,14 @@ type CompletionItem struct {
 	//
 	//     foo(${1:a int}, ${2: b int}, ${3: c int})
 	//
-	placeholderSnippet *snippet.Builder
+	// If WantPlaceholders is false in the CompletionOptions, the above
+	// snippet would instead be:
+	//
+	//     foo(${1:})
+	Snippet *snippet.Builder
 
 	// Documentation is the documentation for the completion item.
 	Documentation string
-}
-
-// Snippet is a convenience function that determines the snippet that should be
-// used for an item, depending on if the callee wants placeholders or not.
-func (i *CompletionItem) Snippet(usePlaceholders bool) string {
-	if usePlaceholders {
-		if i.placeholderSnippet != nil {
-			return i.placeholderSnippet.String()
-		}
-	}
-	if i.plainSnippet != nil {
-		return i.plainSnippet.String()
-	}
-	return i.InsertText
 }
 
 type CompletionItemKind int
@@ -382,6 +360,7 @@ type candidate struct {
 type CompletionOptions struct {
 	WantDeepCompletion bool
 	WantFuzzyMatching  bool
+	WantPlaceholders   bool
 
 	WantUnimported bool
 

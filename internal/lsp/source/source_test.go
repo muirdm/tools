@@ -158,6 +158,7 @@ func (r *runner) Completion(t *testing.T, data tests.Completions, snippets tests
 			}, source.CompletionOptions{
 				WantDeepCompletion: strings.Contains(string(src.URI()), "deepcomplete"),
 				WantFuzzyMatching:  strings.Contains(string(src.URI()), "fuzzymatch"),
+				WantPlaceholders:   usePlaceholders,
 			})
 			if err != nil {
 				t.Fatalf("failed for %v: %v", src, err)
@@ -177,7 +178,11 @@ func (r *runner) Completion(t *testing.T, data tests.Completions, snippets tests
 			if usePlaceholders {
 				expected = want.PlaceholderSnippet
 			}
-			if actual := got.Snippet(usePlaceholders); expected != actual {
+			actual := got.InsertText
+			if got.Snippet != nil {
+				actual = got.Snippet.String()
+			}
+			if expected != actual {
 				t.Errorf("%s: expected placeholder snippet %q, got %q", src, expected, actual)
 			}
 		}
