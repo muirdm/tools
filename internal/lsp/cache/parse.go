@@ -227,11 +227,19 @@ func fix(ctx context.Context, n ast.Node, tok *token.File, src []byte) error {
 			// Don't propagate this error since *ast.BadExpr is very common
 			// and it is only sometimes due to array types. Errors from here
 			// are expected and not actionable in general.
-			fixArrayErr := fixArrayType(n, parent, tok, src)
-			if fixArrayErr == nil {
+			if fixArrayType(n, parent, tok, src) == nil {
 				// Recursively fix in our fixed node.
 				err = fix(ctx, parent, tok, src)
+				return false
 			}
+
+			if fixAccidentalKeyword(n, parent, tok, src) == nil {
+				return false
+			}
+
+			return false
+		case *ast.DeclStmt:
+			fixAccidentalDecl(n, parent, tok, src)
 			return false
 		default:
 			ancestors = append(ancestors, n)
@@ -240,6 +248,89 @@ func fix(ctx context.Context, n ast.Node, tok *token.File, src []byte) error {
 		}
 	})
 	return err
+}
+
+// fixAccidentalDecl tries to fix "accidental" declarations. For example:
+//
+// func typeOf() {}
+// type<>
+//
+// If we find an *ast.DeclStmt with only a single phantom "_" spec, we
+// replace the decl statement with an expression statement containing
+// only the keyword. This allows completion to work to some degree.
+func fixAccidentalDecl(decl *ast.DeclStmt, parent ast.Node, tok *token.File, src []byte) {
+	genDecl, _ := decl.Decl.(*ast.GenDecl)
+	if genDecl == nil || len(genDecl.Specs) != 1 {
+		return
+	}
+
+	isPhantomUnderscore := func(id *ast.Ident) bool {
+		if id.Name != "_" {
+			return false
+		}
+
+		// Phantom underscore means the underscore is not actually in the
+		// program text.
+		offset := tok.Offset(id.Pos())
+		return len(src) <= offset || src[offset] != '_'
+	}
+
+	switch spec := genDecl.Specs[0].(type) {
+	case *ast.TypeSpec:
+		if !isPhantomUnderscore(spec.Name) {
+			return
+		}
+	case *ast.ValueSpec:
+		if len(spec.Names) != 1 || !isPhantomUnderscore(spec.Names[0]) {
+			return
+		}
+	}
+
+	replaceNode(parent, decl, &ast.ExprStmt{
+		X: &ast.Ident{
+			Name:    genDecl.Tok.String(),
+			NamePos: decl.Pos(),
+		},
+	})
+}
+
+// fixAccidentalKeyword tries to fix "accidental" keyword expressions. For example:
+//
+// variance := 123
+// doMath(var<>)
+//
+// If we find an *ast.BadExpr that begins with a keyword, we replace
+// the BadExpr with an *ast.Ident containing the text of the keyword.
+// This allows completion to work to some degree.
+func fixAccidentalKeyword(bad *ast.BadExpr, parent ast.Node, tok *token.File, src []byte) error {
+	if !bad.From.IsValid() {
+		return errors.Errorf("invalid BadExpr from: %d", bad.From)
+	}
+
+	// Find lowercase ASCII prefix of the bad expression.
+	var maybeKeywordBytes []byte
+	for i := tok.Offset(bad.From); i < len(src); i++ {
+		if src[i] < 'a' || src[i] > 'z' {
+			break
+		}
+		maybeKeywordBytes = append(maybeKeywordBytes, src[i])
+
+		// Stop search at arbitrarily chosen too-long-for-a-keyword length.
+		if len(maybeKeywordBytes) > 15 {
+			return errors.New("BadExpr prefix too long to be keyword")
+		}
+	}
+
+	maybeKeyword := string(maybeKeywordBytes)
+	if !token.IsKeyword(maybeKeyword) {
+		return errors.New("BadExpr prefix isn't keyword")
+	}
+
+	if replaceNode(parent, bad, &ast.Ident{Name: maybeKeyword, NamePos: bad.Pos()}) {
+		return nil
+	}
+
+	return errors.New("couldn't fix keyword")
 }
 
 // fixArrayType tries to parse an *ast.BadExpr into an *ast.ArrayType.

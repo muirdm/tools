@@ -1,0 +1,12 @@
+package keywords
+
+func _() {
+	// non-matching candidate - shouldn't show up as completion
+	apple := "apple"
+
+	variance := 123 //@item(kwVariance, "variance", "int", "var")
+	println(var) //@complete(")", kwVariance)
+
+	var typeName string //@item(kwTypeName, "typeName", "string", "var")
+	type //@complete(" //", kwTypeName)
+}
